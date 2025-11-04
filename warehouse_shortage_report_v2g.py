@@ -50,20 +50,34 @@ def dns_present(series: pd.Series) -> pd.Series:
 
 def autosize_sheet(writer, sheet_name, df):
     ws = writer.sheets[sheet_name]
+    if not hasattr(writer, "_col_widths"):
+        writer._col_widths = {}
     for idx, col in enumerate(df.columns):
         series = df[col].astype("string").fillna("")
         # sample up to first 1500 values for speed
         sample = series.head(1500)
         max_len = max([len(str(col))] + [len(x) for x in sample])
-        ws.set_column(idx, idx, min(max_len + 2, 60))
+        width = min(max_len + 2, 60)
+        writer._col_widths[(sheet_name, idx)] = width
+        ws.set_column(idx, idx, width)
 
 def apply_formats(writer, sheet_name, df):
     wb = writer.book
     ws = writer.sheets[sheet_name]
-    pct_fmt = wb.add_format({"num_format": "0.0%"})
+    if not hasattr(writer, "_pct_fmt"):
+        writer._pct_fmt = wb.add_format({"num_format": "0.0%"})
+    if not hasattr(writer, "_text_fmt"):
+        writer._text_fmt = wb.add_format({"num_format": "@"})
+
+    widths = getattr(writer, "_col_widths", {})
+
     for idx, col in enumerate(df.columns):
-        if str(col).lower().endswith("_pct"):
-            ws.set_column(idx, idx, None, pct_fmt)
+        col_key = str(col).strip().casefold()
+        width = widths.get((sheet_name, idx))
+        if col_key.startswith("pip"):
+            ws.set_column(idx, idx, width, writer._text_fmt)
+        elif col_key.endswith("_pct"):
+            ws.set_column(idx, idx, width, writer._pct_fmt)
 
 def add_share_and_rate(df, qty_col, denom_col):
     if df.empty:
@@ -190,6 +204,8 @@ def main():
         df["SupplierName_Final"] = sup_final
         df["Group_Final"]        = grp_final2
         df["Orderlist_Final"]    = ordlist_final
+        # Ensure the main PIP identifier stays text-based so Excel exports preserve formatting
+        df[oc["pipcode"]] = df[oc["pipcode"]].astype("string")
         if prod_name: df["Product_Description"] = df[prod_name].astype("string")
         else: df["Product_Description"] = ""
         if prod_pack: df["Pack_Size"] = df[prod_pack].astype("string")
@@ -588,51 +604,61 @@ def main():
         mis_cols = [c for c in [oc["pipcode"], oc["department"], oc["branch"], oc["req"], oc["ord"], oc["delv"], oc["completed"]] if c]
         mis_detail = df.loc[mis_mask, mis_cols].copy() if mis_cols else pd.DataFrame()
 
+        summary_columns = [
+            "PIPCode",
+            "productName",
+            "packSize",
+            "binLocation",
+            "mismatch_qty_difference",
+        ]
         if not mis_mask.any() or not oc["pipcode"]:
-            mis_summary = pd.DataFrame(columns=[
-                "PIPCode",
-                "productName",
-                "packSize",
-                "binLocation",
-                "mismatch_qty_difference",
-            ])
+            mis_summary = pd.DataFrame(columns=summary_columns)
         else:
             mismatched_rows = df.loc[mis_mask].copy()
-            mismatch_diff = mismatched_rows["_Ord"] - mismatched_rows["_Del"]
+            completed_mask = df["_IsCompleted"].reindex(mismatched_rows.index, fill_value=False)
+            mismatched_completed = mismatched_rows.loc[completed_mask].copy()
 
-            summary_df = pd.DataFrame({
-                "PIPCode": mismatched_rows[oc["pipcode"]].astype("string"),
-                "mismatch_qty_difference": mismatch_diff,
-            })
-
-            if prod_name:
-                summary_df["productName"] = mismatched_rows[prod_name].astype("string")
+            if mismatched_completed.empty:
+                mis_summary = pd.DataFrame(columns=summary_columns)
             else:
-                summary_df["productName"] = ""
+                mismatch_diff = mismatched_completed["_Ord"] - mismatched_completed["_Del"]
 
-            if prod_pack:
-                summary_df["packSize"] = mismatched_rows[prod_pack].astype("string")
-            else:
-                summary_df["packSize"] = ""
+                summary_df = pd.DataFrame({
+                    "PIPCode": mismatched_completed[oc["pipcode"]].astype("string"),
+                    "mismatch_qty_difference": mismatch_diff,
+                })
 
-            if prod_bin:
-                summary_df["binLocation"] = mismatched_rows[prod_bin].astype("string")
-            else:
-                summary_df["binLocation"] = ""
+                if prod_name:
+                    summary_df["productName"] = mismatched_completed[prod_name].astype("string")
+                else:
+                    summary_df["productName"] = ""
 
-            mis_summary = (
-                summary_df
-                .groupby(["PIPCode", "productName", "packSize", "binLocation"], dropna=False)
-                .agg(mismatch_qty_difference=("mismatch_qty_difference", "sum"))
-                .reset_index()
-            )
+                if prod_pack:
+                    summary_df["packSize"] = mismatched_completed[prod_pack].astype("string")
+                else:
+                    summary_df["packSize"] = ""
 
-            if not mis_summary.empty:
-                mis_summary["abs_mismatch_qty_difference"] = mis_summary["mismatch_qty_difference"].abs()
-                mis_summary = mis_summary.sort_values(
-                    ["abs_mismatch_qty_difference", "mismatch_qty_difference"],
-                    ascending=[False, False],
-                ).drop(columns="abs_mismatch_qty_difference")
+                if prod_bin:
+                    summary_df["binLocation"] = mismatched_completed[prod_bin].astype("string")
+                else:
+                    summary_df["binLocation"] = ""
+
+                mis_summary = (
+                    summary_df
+                    .groupby(["PIPCode", "productName", "packSize", "binLocation"], dropna=False)
+                    .agg(mismatch_qty_difference=("mismatch_qty_difference", "sum"))
+                    .reset_index()
+                )
+
+                if not mis_summary.empty:
+                    mis_summary["abs_mismatch_qty_difference"] = mis_summary["mismatch_qty_difference"].abs()
+                    mis_summary = mis_summary.sort_values(
+                        ["abs_mismatch_qty_difference", "mismatch_qty_difference"],
+                        ascending=[False, False],
+                    ).drop(columns="abs_mismatch_qty_difference")
+        mis_mask = df["_Del"] != df["_Ord"]
+        mis_cols = [c for c in [oc["pipcode"], oc["department"], oc["branch"], oc["req"], oc["ord"], oc["delv"], oc["completed"]] if c]
+        mis_detail = df.loc[mis_mask, mis_cols].copy() if mis_cols else pd.DataFrame()
 
         # ------ Unmatched tabs ------
         unmatched_pips_tab = (

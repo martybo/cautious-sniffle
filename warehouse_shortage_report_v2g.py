@@ -163,6 +163,7 @@ def main():
         prod_ordl  = find_col(prod_clean, CAND["orderlist"])
         prod_name  = find_col(prod_clean, ["productName","Description","Product Description"])
         prod_pack  = find_col(prod_clean, ["packSize","Pack Size"])
+        prod_maxord = find_col(prod_clean, CAND["maxord"])
 
         # ---- merge (safe backfill only) ----
         log("Merging orders with product list...")
@@ -252,14 +253,42 @@ def main():
         # ------ Rule 1 & Rule 2 (caps) ------
         has_dns_mask = dns_present(df["doNotStockReason_Final"])
         # maxorderquantity: prefer orders value else 0 (product sometimes holds this too, but in provided extracts it's not present)
-        if oc["maxord"] and oc["maxord"] in df.columns:
-            mo = ensure_numeric(df[oc["maxord"]])
-        else:
-            mo = pd.Series(0, index=df.index)
+        mo_candidates = []
+        if oc["maxord"]:
+            mo_candidates.append(oc["maxord"])
+        if prod_maxord:
+            mo_candidates.append(prod_maxord)
+            mo_candidates.append(f"{prod_maxord}__prod")
 
-        # Rule 2 mask: capped if delv < ord, mo>0, and eff delivery (or delivery) >= mo.
-        # Use EffDel to treat non-completed lines consistently.
-        rule2_mask = (df["_EffDel"] < df["_Ord"]) & (mo > 0) & (df["_EffDel"] >= mo)
+        seen = set()
+        deduped = []
+        for col in mo_candidates:
+            if not col or col in seen:
+                continue
+            seen.add(col)
+            deduped.append(col)
+        mo_candidates = deduped
+
+        mo = None
+        fallback_mo = None
+        for col in mo_candidates:
+            if col not in df.columns:
+                continue
+            series = ensure_numeric(df[col])
+            if fallback_mo is None:
+                fallback_mo = series
+            if series.max(skipna=True) > 0:
+                mo = series
+                break
+        if mo is None:
+            mo = fallback_mo if fallback_mo is not None else pd.Series(0, index=df.index, dtype=float)
+
+        # Rule 2 mask: capped if the request exceeds the maximum order quantity.
+        # Allow for the common case where the warehouse supplied the full capped quantity
+        # (Ord == max order).  In that situation the shortage comes from the request being
+        # greater than the cap, so we look for request > cap and the order meeting the cap
+        # (or higher, e.g. if the cap changes mid-stream).
+        rule2_mask = (mo > 0) & (df["_Req"] > mo) & (df["_Ord"] >= mo)
         rule2_capped_lines = int(rule2_mask.sum())
 
         # Base metric eligibility

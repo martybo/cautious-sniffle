@@ -163,6 +163,7 @@ def main():
         prod_ordl  = find_col(prod_clean, CAND["orderlist"])
         prod_name  = find_col(prod_clean, ["productName","Description","Product Description"])
         prod_pack  = find_col(prod_clean, ["packSize","Pack Size"])
+        prod_bin   = find_col(prod_clean, ["binLocation","Bin Location","Bin","Bin Code"])
         prod_maxord = find_col(prod_clean, CAND["maxord"])
 
         # ---- merge (safe backfill only) ----
@@ -193,6 +194,8 @@ def main():
         else: df["Product_Description"] = ""
         if prod_pack: df["Pack_Size"] = df[prod_pack].astype("string")
         else: df["Pack_Size"] = ""
+        if prod_bin: df["Bin_Location"] = df[prod_bin].astype("string")
+        else: df["Bin_Location"] = ""
 
         # dns final
         orders_dns  = df[oc["dns"]].astype("string") if oc["dns"] else pd.Series("", index=df.index, dtype="string")
@@ -582,11 +585,54 @@ def main():
 
         # ------ Mismatch (Deliver != Order), info only ------
         mis_mask = df["_Del"] != df["_Ord"]
-        mis_detail = df.loc[mis_mask, [oc["pipcode"], oc["department"], oc["branch"], oc["req"], oc["ord"], oc["delv"], oc["completed"]]].copy() if oc["department"] else df.loc[mis_mask, [oc["pipcode"], oc["branch"], oc["req"], oc["ord"], oc["delv"], oc["completed"]]].copy()
-        if not mis_detail.empty and oc["pipcode"]:
-            mis_summary = mis_detail.groupby([oc["pipcode"], oc["department"], oc["branch"]].copy() if oc["department"] else [oc["pipcode"], oc["branch"]], dropna=False).size().reset_index(name="lines")
+        mis_cols = [c for c in [oc["pipcode"], oc["department"], oc["branch"], oc["req"], oc["ord"], oc["delv"], oc["completed"]] if c]
+        mis_detail = df.loc[mis_mask, mis_cols].copy() if mis_cols else pd.DataFrame()
+
+        if not mis_mask.any() or not oc["pipcode"]:
+            mis_summary = pd.DataFrame(columns=[
+                "PIPCode",
+                "productName",
+                "packSize",
+                "binLocation",
+                "mismatch_qty_difference",
+            ])
         else:
-            mis_summary = pd.DataFrame(columns=["lines"])
+            mismatched_rows = df.loc[mis_mask].copy()
+            mismatch_diff = mismatched_rows["_Ord"] - mismatched_rows["_Del"]
+
+            summary_df = pd.DataFrame({
+                "PIPCode": mismatched_rows[oc["pipcode"]].astype("string"),
+                "mismatch_qty_difference": mismatch_diff,
+            })
+
+            if prod_name:
+                summary_df["productName"] = mismatched_rows[prod_name].astype("string")
+            else:
+                summary_df["productName"] = ""
+
+            if prod_pack:
+                summary_df["packSize"] = mismatched_rows[prod_pack].astype("string")
+            else:
+                summary_df["packSize"] = ""
+
+            if prod_bin:
+                summary_df["binLocation"] = mismatched_rows[prod_bin].astype("string")
+            else:
+                summary_df["binLocation"] = ""
+
+            mis_summary = (
+                summary_df
+                .groupby(["PIPCode", "productName", "packSize", "binLocation"], dropna=False)
+                .agg(mismatch_qty_difference=("mismatch_qty_difference", "sum"))
+                .reset_index()
+            )
+
+            if not mis_summary.empty:
+                mis_summary["abs_mismatch_qty_difference"] = mis_summary["mismatch_qty_difference"].abs()
+                mis_summary = mis_summary.sort_values(
+                    ["abs_mismatch_qty_difference", "mismatch_qty_difference"],
+                    ascending=[False, False],
+                ).drop(columns="abs_mismatch_qty_difference")
 
         # ------ Unmatched tabs ------
         unmatched_pips_tab = (

@@ -561,9 +561,10 @@ def main():
 
         # ------ Unmatched tabs ------
         unmatched_pips_tab = (
-            unmatched_pips.value_counts().reset_index()
-            .rename(columns={"index":"PIPCode", oc["pipcode"]:"count"})
-            .sort_values(by="count", ascending=False)
+            unmatched_pips.value_counts()
+            .rename_axis("PIPCode")
+            .reset_index(name="unmatched_count")
+            .sort_values(by="unmatched_count", ascending=False)
         )
         unmatched_orderlines_tab = unmatched_detail[
             [oc["branch"], oc["orderno"], oc["completed"], oc["pipcode"], oc["req"], oc["ord"], oc["delv"], "Orderlist_Final"]

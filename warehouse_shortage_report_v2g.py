@@ -257,9 +257,12 @@ def main():
         else:
             mo = pd.Series(0, index=df.index)
 
-        # Rule 2 mask: capped if delv < ord, mo>0, and eff delivery (or delivery) >= mo.
-        # Use EffDel to treat non-completed lines consistently.
-        rule2_mask = (df["_EffDel"] < df["_Ord"]) & (mo > 0) & (df["_EffDel"] >= mo)
+        # Rule 2 mask: capped if the request exceeds the maximum order quantity.
+        # Allow for the common case where the warehouse supplied the full capped quantity
+        # (Ord == max order).  In that situation the shortage comes from the request being
+        # greater than the cap, so we look for request > cap and the order meeting the cap
+        # (or higher, e.g. if the cap changes mid-stream).
+        rule2_mask = (mo > 0) & (df["_Req"] > mo) & (df["_Ord"] >= mo)
         rule2_capped_lines = int(rule2_mask.sum())
 
         # Base metric eligibility

@@ -656,6 +656,9 @@ def main():
                         ["abs_mismatch_qty_difference", "mismatch_qty_difference"],
                         ascending=[False, False],
                     ).drop(columns="abs_mismatch_qty_difference")
+        mis_mask = df["_Del"] != df["_Ord"]
+        mis_cols = [c for c in [oc["pipcode"], oc["department"], oc["branch"], oc["req"], oc["ord"], oc["delv"], oc["completed"]] if c]
+        mis_detail = df.loc[mis_mask, mis_cols].copy() if mis_cols else pd.DataFrame()
 
         # ------ Unmatched tabs ------
         unmatched_pips_tab = (

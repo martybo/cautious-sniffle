@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import argparse, sys, re, pandas as pd, numpy as np
+import argparse
+import re
+import sys
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from collections import defaultdict, Counter
+
+import numpy as np
+import pandas as pd
 
 # ---------- tiny utils ----------
 def now() -> str: return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -416,61 +421,74 @@ def main():
         roll_mask_base = metric_sorted & (~contrib)
 
         # ------ Orderlist rollup (ALL routes) ------
-        def rollup_orderlist_all(df_ref: pd.DataFrame) -> pd.DataFrame:
-        """
-        Orderlist roll-up across ALL routes (not just Warehouse-like).
-        Expects on df_ref:
-          - 'Orderlist_Final'
-          - 'TrueShortQty_ALL'              (per-line)
-          - 'dedup_req_attributed_ALL'      (per-line, denominator)
-          - '_IsCompleted' (bool)
-          - '_Effective_Delivery_Used' (exists but not used here)
-        Also expects a module/global 'completed_only' (bool) set from args.
-        """
+        completed_only = args.completed_only
 
-        # Rebuild the metric mask *from df_ref itself* so lengths match.
-        if completed_only:
-            mask_metric = df_ref["_IsCompleted"].fillna(False)
-        else:
-            # include non-completed rows (treated with OrderQty-as-Delivery upstream)
-            mask_metric = pd.Series(True, index=df_ref.index)
+        def rollup_orderlist_all(
+            df_ref: pd.DataFrame,
+            eligible_mask: pd.Series,
+            denom_map: dict[str, float],
+        ) -> pd.DataFrame:
+            """Build the orderlist roll-up across all order routes."""
 
-        # Basic roll-up
-        g = (
-            df_ref.loc[mask_metric]
-                  .groupby("Orderlist_Final", dropna=False)
-                  .agg(
-                      true_short_qty=("TrueShortQty_ALL", "sum"),
-                      true_short_lines=("TrueShortQty_ALL", lambda s: (s > 0).sum()),
-                      dedup_req_qty=("dedup_req_attributed_ALL", "sum"),
-                  )
-                  .reset_index()
-        )
+            mask_metric = eligible_mask.reindex(df_ref.index, fill_value=False)
+            if completed_only:
+                mask_metric &= df_ref["_IsCompleted"].fillna(False)
 
-        g = add_share_and_rate(g, "true_short_qty", "dedup_req_qty")
+            grouped = (
+                df_ref.loc[mask_metric]
+                      .groupby("Orderlist_Final", dropna=False)
+                      .agg(
+                          true_short_qty=("TrueShortQty_ALL", "sum"),
+                          true_short_lines=("TrueShortQty_ALL", lambda s: (s > 0).sum()),
+                      )
+                      .reset_index()
+            )
 
-        # Company summary row
-        comp = pd.DataFrame([{
-            "Orderlist": "Company (selected orderlists)",
-            "true_short_qty": g["true_short_qty"].sum(),
-            "true_short_lines": g["true_short_lines"].sum(),
-            "dedup_req_qty": g["dedup_req_qty"].sum(),
-        }])
-        comp = add_share_and_rate(comp, "true_short_qty", "dedup_req_qty")
+            denom_df = (
+                pd.DataFrame(
+                    [(k, v) for k, v in denom_map.items()],
+                    columns=["Orderlist_Final", "dedup_req_qty"],
+                )
+                if denom_map
+                else pd.DataFrame(columns=["Orderlist_Final", "dedup_req_qty"])
+            )
 
-        out = pd.concat([comp, g.rename(columns={"Orderlist_Final": "Orderlist"})], ignore_index=True)
-        return out.sort_values("true_short_qty", ascending=False)
+            summary = denom_df.merge(grouped, on="Orderlist_Final", how="outer")
+            summary = summary.fillna({
+                "dedup_req_qty": 0.0,
+                "true_short_qty": 0.0,
+                "true_short_lines": 0.0,
+            })
+            summary = add_share_and_rate(summary, "true_short_qty", "dedup_req_qty")
+
+            summary = summary.rename(columns={"Orderlist_Final": "Orderlist"})
+            wh_like_set = set(wh_list)
+            orderlist_cf = summary["Orderlist"].astype("string").fillna("").str.casefold()
+            wh_like_mask = orderlist_cf.isin(wh_like_set)
+
+            comp_vals = summary.loc[wh_like_mask, ["true_short_qty", "true_short_lines", "dedup_req_qty"]].sum()
+            comp = pd.DataFrame([
+                {
+                    "Orderlist": "Company (WH-like)",
+                    "true_short_qty": float(comp_vals.get("true_short_qty", 0.0)),
+                    "true_short_lines": float(comp_vals.get("true_short_lines", 0.0)),
+                    "dedup_req_qty": float(comp_vals.get("dedup_req_qty", 0.0)),
+                }
+            ])
+            comp = add_share_and_rate(comp, "true_short_qty", "dedup_req_qty")
+
+            out = pd.concat([comp, summary], ignore_index=True)
+            return out.sort_values("true_short_qty", ascending=False)
 
         # ------ Warehouse-only rollups ------
         def rollup_wh(df_ref, by_series, title, denom_map):
-            # *** CRASH FIX: reindex masks to df_ref BEFORE use ***
-            wh_m = pd.Series(wh_sorted, index=df.index).reindex(df_ref.index, fill_value=False)
+            wh_m = wh_sorted.reindex(df_ref.index, fill_value=False)
             mask = roll_mask_base.reindex(df_ref.index, fill_value=False) & wh_m
             if by_series is None:
                 return pd.DataFrame(columns=[title,"true_short_qty","true_short_lines","dedup_req_qty","true_short_qty_pct","shortage_rate_pct"])
             key_series = by_series.rename(title)
             g = (
-                df_ref.loc[mask.to_numpy()]
+                df_ref.loc[mask]
                       .groupby(key_series, dropna=False)
                       .agg(true_short_qty=("TrueShortQty_WH","sum"),
                            true_short_lines=("TrueShortQty_WH", lambda s: (s>0).sum()))
@@ -487,7 +505,7 @@ def main():
         r_dep = rollup_wh(df_clean, df_clean["Department_Final"], "Department", denom_dep)
         r_sup = rollup_wh(df_clean, df_clean["SupplierName_Final"], "SupplierName", denom_sup)
         r_grp = rollup_wh(df_clean, df_clean["Group_Final"], "Group", denom_grp)
-        r_ord = rollup_orderlist_all(df_clean)
+        r_ord = rollup_orderlist_all(df_clean, roll_mask_base, denom_ord_all)
 
         # ------ Branch_NC & Company_NC (only WH & WH-CD orderlists) ------
         nc_mask_final = roll_mask_base & nc_sorted
@@ -603,7 +621,7 @@ def main():
                 ("Company_NC", company_nc),
                 ("Unmatched_PIPs", unmatched_pips_tab),
                 ("Unmatched_Orderlines", unmatched_orderlines_tab),
-                ("Rogue_Orderlines", rogue_lines[
+                ("Outlier_Orders_gt80pct", rogue_lines[
                     [oc["branch"], oc["orderno"], oc["completed"], oc["pipcode"], "Product_Description","Pack_Size",
                      "Orderlist_Final","Department_Final","Group_Final","SupplierName_Final",
                      "_Req","_Ord","_EffDel","TrueShortQty_ALL"]

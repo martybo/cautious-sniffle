@@ -33,6 +33,36 @@ def ensure_numeric(s):
     out = pd.to_numeric(s, errors="coerce")
     return out.fillna(0)
 
+def normalise_pip(series: pd.Series) -> pd.Series:
+    """Return a cleaned representation of PIP codes suitable for Excel export.
+
+    Any entries that can be interpreted as whole numbers are converted back to
+    integer objects so Excel will display them using the default *General*
+    formatting (i.e. without forcing a text format or preserving leading zeros).
+    Non-numeric values are trimmed and have trailing ``.0`` artefacts removed,
+    but otherwise left as text.
+    """
+
+    if series is None:
+        return series
+
+    raw = series.astype("string").fillna("").str.strip()
+    cleaned_text = raw.str.replace(r"(?<=\d)\.0+$", "", regex=True)
+    result = cleaned_text.astype(object)
+
+    numeric = pd.to_numeric(raw, errors="coerce")
+    numeric_mask = numeric.notna()
+    int_like_mask = pd.Series(False, index=series.index)
+    if numeric_mask.any():
+        frac_ok = numeric.loc[numeric_mask].mod(1).abs().le(1e-9)
+        int_like_mask.loc[frac_ok.index] = frac_ok
+
+    if int_like_mask.any():
+        ints = numeric.loc[int_like_mask].round(0).astype(np.int64)
+        result.loc[int_like_mask] = ints.astype(object)
+
+    return result
+
 def parse_date(s): return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 def coalesce(a, b):
@@ -66,8 +96,6 @@ def apply_formats(writer, sheet_name, df):
     ws = writer.sheets[sheet_name]
     if not hasattr(writer, "_pct_fmt"):
         writer._pct_fmt = wb.add_format({"num_format": "0.0%"})
-    if not hasattr(writer, "_text_fmt"):
-        writer._text_fmt = wb.add_format({"num_format": "@"})
 
     widths = getattr(writer, "_col_widths", {})
 
@@ -75,7 +103,7 @@ def apply_formats(writer, sheet_name, df):
         col_key = str(col).strip().casefold()
         width = widths.get((sheet_name, idx))
         if col_key.startswith("pip"):
-            ws.set_column(idx, idx, width, writer._text_fmt)
+            ws.set_column(idx, idx, width)
         elif col_key.endswith("_pct"):
             ws.set_column(idx, idx, width, writer._pct_fmt)
 
@@ -204,8 +232,8 @@ def main():
         df["SupplierName_Final"] = sup_final
         df["Group_Final"]        = grp_final2
         df["Orderlist_Final"]    = ordlist_final
-        # Ensure the main PIP identifier stays text-based so Excel exports preserve formatting
-        df[oc["pipcode"]] = df[oc["pipcode"]].astype("string")
+        # Ensure the main PIP identifier exports cleanly for Excel consumers
+        df[oc["pipcode"]] = normalise_pip(df[oc["pipcode"]])
         if prod_name: df["Product_Description"] = df[prod_name].astype("string")
         else: df["Product_Description"] = ""
         if prod_pack: df["Pack_Size"] = df[prod_pack].astype("string")

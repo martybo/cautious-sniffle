@@ -668,7 +668,12 @@ def main():
         )
 
         # ------ Mismatch (Deliver != Order), info only ------
-        mis_mask = (df["_Del"] != df["_Ord"]) & (~optimise_mask)
+        excluded_mismatch_sources = {"medicare warehouse", "warehouse cds"}
+        ordlist_cf = df["Orderlist_Final"].astype("string").str.strip().str.casefold()
+        supplier_cf = df["SupplierName_Final"].astype("string").str.strip().str.casefold()
+        mismatch_exclusion_mask = ordlist_cf.isin(excluded_mismatch_sources) | supplier_cf.isin(excluded_mismatch_sources)
+
+        mis_mask = (df["_Del"] != df["_Ord"]) & (~optimise_mask) & (~mismatch_exclusion_mask)
         mis_cols = [c for c in [oc["pipcode"], oc["department"], oc["branch"], oc["req"], oc["ord"], oc["delv"], oc["completed"]] if c]
         mis_detail = df.loc[mis_mask, mis_cols].copy() if mis_cols else pd.DataFrame()
 
@@ -731,8 +736,6 @@ def main():
                         ["abs_mismatch_qty_difference", "mismatch_qty_difference"],
                         ascending=[False, False],
                     ).drop(columns="abs_mismatch_qty_difference")
-        mis_mask = (df["_Del"] != df["_Ord"]) & (~optimise_mask)
-        mis_cols = [c for c in [oc["pipcode"], oc["department"], oc["branch"], oc["req"], oc["ord"], oc["delv"], oc["completed"]] if c]
         mis_detail = df.loc[mis_mask, mis_cols].copy() if mis_cols else pd.DataFrame()
 
         # ------ Unmatched tabs ------

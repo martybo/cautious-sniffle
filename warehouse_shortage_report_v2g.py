@@ -34,13 +34,13 @@ def ensure_numeric(s):
     return out.fillna(0)
 
 def normalise_pip(series: pd.Series) -> pd.Series:
-    """Return a cleaned textual representation of PIP codes.
+    """Return a cleaned representation of PIP codes suitable for Excel export.
 
-    The upstream extracts often provide the identifier as floats (e.g. 1234567.0)
-    which Excel displays with the trailing decimal.  We coerce any numeric-looking
-    values back to whole numbers, drop the decimal portion, and pad pure digit
-    values to seven characters – matching the typical PIP width – so the
-    generated spreadsheets already have the correct text formatting.
+    Any entries that can be interpreted as whole numbers are converted back to
+    integer objects so Excel will display them using the default *General*
+    formatting (i.e. without forcing a text format or preserving leading zeros).
+    Non-numeric values are trimmed and have trailing ``.0`` artefacts removed,
+    but otherwise left as text.
     """
 
     if series is None:
@@ -235,7 +235,7 @@ def main():
         df["SupplierName_Final"] = sup_final
         df["Group_Final"]        = grp_final2
         df["Orderlist_Final"]    = ordlist_final
-        # Ensure the main PIP identifier stays text-based so Excel exports preserve formatting
+        # Ensure the main PIP identifier exports cleanly for Excel consumers
         df[oc["pipcode"]] = normalise_pip(df[oc["pipcode"]])
         if prod_name: df["Product_Description"] = df[prod_name].astype("string")
         else: df["Product_Description"] = ""

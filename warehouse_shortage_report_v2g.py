@@ -230,6 +230,11 @@ def main():
         df["SupplierName_Final"] = sup_final
         df["Group_Final"]        = grp_final2
         df["Orderlist_Final"]    = ordlist_final
+
+        # Optimise routes generate noisy duplicate lines; exclude them from reporting
+        optimise_mask = df["Orderlist_Final"].astype("string").str.contains("optimise", case=False, na=False)
+        optimise_mask |= df["SupplierName_Final"].astype("string").str.contains("optimise", case=False, na=False)
+        df["_IsOptimiseRoute"] = optimise_mask
         # Ensure the main PIP identifier exports cleanly for Excel consumers
         df[oc["pipcode"]] = normalise_pip(df[oc["pipcode"]])
         if prod_name: df["Product_Description"] = df[prod_name].astype("string")
@@ -292,8 +297,9 @@ def main():
 
         # ------ Unmatched PIPs (exclude from all calcs, but list) ------
         unmatched_mask = df[pc_key].isna()
-        unmatched_pips = df.loc[unmatched_mask, oc["pipcode"]].astype(str)
-        unmatched_detail = df.loc[unmatched_mask].copy()
+        unmatched_active = unmatched_mask & (~optimise_mask)
+        unmatched_pips = df.loc[unmatched_active, oc["pipcode"]].astype(str)
+        unmatched_detail = df.loc[unmatched_active].copy()
 
         # ------ Rule 1 & Rule 2 (caps) ------
         has_dns_mask = dns_present(df["doNotStockReason_Final"])
@@ -342,7 +348,7 @@ def main():
         rule2_capped_lines = int(rule2_mask.sum())
 
         # Base metric eligibility
-        metric_mask = metric_mask_base & (~unmatched_mask) & (~is_sub)
+        metric_mask = metric_mask_base & (~unmatched_mask) & (~is_sub) & (~optimise_mask)
 
         # ------ Warehouse-like set / NC set ------
         wh_list = [x.strip().casefold() for x in args.warehouse_orderlists.split(";") if x.strip() != ""]
@@ -579,7 +585,7 @@ def main():
             return g.sort_values(by=["true_short_qty","true_short_lines"], ascending=False)
 
         # ------ Clean dataframe for rollups: drop unmatched & subs ------
-        df_clean = df.loc[~unmatched_mask & (~is_sub)].copy()
+        df_clean = df.loc[~unmatched_mask & (~is_sub) & (~optimise_mask)].copy()
 
         r_dep = rollup_wh(df_clean, df_clean["Department_Final"], "Department", denom_dep)
         r_sup = rollup_wh(df_clean, df_clean["SupplierName_Final"], "SupplierName", denom_sup)
@@ -662,7 +668,7 @@ def main():
         )
 
         # ------ Mismatch (Deliver != Order), info only ------
-        mis_mask = df["_Del"] != df["_Ord"]
+        mis_mask = (df["_Del"] != df["_Ord"]) & (~optimise_mask)
         mis_cols = [c for c in [oc["pipcode"], oc["department"], oc["branch"], oc["req"], oc["ord"], oc["delv"], oc["completed"]] if c]
         mis_detail = df.loc[mis_mask, mis_cols].copy() if mis_cols else pd.DataFrame()
 
@@ -725,7 +731,7 @@ def main():
                         ["abs_mismatch_qty_difference", "mismatch_qty_difference"],
                         ascending=[False, False],
                     ).drop(columns="abs_mismatch_qty_difference")
-        mis_mask = df["_Del"] != df["_Ord"]
+        mis_mask = (df["_Del"] != df["_Ord"]) & (~optimise_mask)
         mis_cols = [c for c in [oc["pipcode"], oc["department"], oc["branch"], oc["req"], oc["ord"], oc["delv"], oc["completed"]] if c]
         mis_detail = df.loc[mis_mask, mis_cols].copy() if mis_cols else pd.DataFrame()
 
@@ -749,21 +755,23 @@ def main():
         }).sort_values(by=["Branch","Branch Order No."])
 
         # ------ Diagnostics ------
+        non_opt_mask = ~optimise_mask
         diag = {
-            "rows_total": int(len(df)),
-            "rows_completed": int(df["_IsCompleted"].sum()),
-            "rows_non_completed": int((~df["_IsCompleted"]).sum()),
+            "rows_total": int(non_opt_mask.sum()),
+            "rows_completed": int(df.loc[non_opt_mask, "_IsCompleted"].sum()),
+            "rows_non_completed": int((non_opt_mask & (~df["_IsCompleted"])).sum()),
             "warehouse_like_rows_matched": warehouse_like_rows_matched,
-            "substituted_rows": substituted_rows,
-            "unmatched_pip_rows": int(unmatched_mask.sum()),
-            "rule2_capped_lines": rule2_capped_lines,
-            "base_short_lines": int((df["_ShortEff"]>0).sum()),
-            "base_short_qty": float(df.loc[df["_ShortEff"]>0, "_ShortEff"].sum()),
-            "final_true_short_lines_WH": int((df["TrueShortQty_WH"]>0).sum()),
-            "final_true_short_qty_WH": float(df["TrueShortQty_WH"].sum()),
-            "final_true_short_lines_ALL": int((df["TrueShortQty_ALL"]>0).sum()),
-            "final_true_short_qty_ALL": float(df["TrueShortQty_ALL"].sum()),
+            "substituted_rows": int((is_sub & non_opt_mask).sum()),
+            "unmatched_pip_rows": int(unmatched_active.sum()),
+            "rule2_capped_lines": int((rule2_mask & non_opt_mask).sum()),
+            "base_short_lines": int(((df["_ShortEff"]>0) & non_opt_mask).sum()),
+            "base_short_qty": float(df.loc[non_opt_mask & (df["_ShortEff"]>0), "_ShortEff"].sum()),
+            "final_true_short_lines_WH": int(((df["TrueShortQty_WH"]>0) & non_opt_mask).sum()),
+            "final_true_short_qty_WH": float(df.loc[non_opt_mask, "TrueShortQty_WH"].sum()),
+            "final_true_short_lines_ALL": int(((df["TrueShortQty_ALL"]>0) & non_opt_mask).sum()),
+            "final_true_short_qty_ALL": float(df.loc[non_opt_mask, "TrueShortQty_ALL"].sum()),
             "rogue_order_lines_excluded": rogue_count,
+            "optimise_rows_excluded": int(optimise_mask.sum()),
         }
         diag_df = pd.DataFrame([{"metric": k, "value": v} for k,v in diag.items()])
 
@@ -774,6 +782,8 @@ def main():
                 dt = pd.to_datetime(earliest, errors="coerce", dayfirst=True).min()
                 if pd.notna(dt):
                     suffix = "_wc" + dt.strftime("%d%m%y")
+
+        orders_enriched = df.loc[non_opt_mask].copy()
 
         final_out = out_path.with_name(out_path.stem + suffix + out_path.suffix)
         log(f"Writing Excel: {final_out}")
@@ -801,7 +811,7 @@ def main():
                     oc["pipcode"]:"PIPCode", "_Req":"Req Qty", "_Ord":"Order Qty", "_EffDel":"Deliver Qty (effective)",
                 })),
                 ("Diagnostics", diag_df),
-                ("Orders_Enriched", df)  # full trace (includes flags, useful for audit)
+                ("Orders_Enriched", orders_enriched)  # full trace (includes flags, useful for audit)
             ]
             for name, data in sheets:
                 data.to_excel(xw, index=False, sheet_name=name)

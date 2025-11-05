@@ -46,22 +46,25 @@ def normalise_pip(series: pd.Series) -> pd.Series:
     if series is None:
         return series
 
-    raw = series.astype("string").fillna("").str.strip()
-    cleaned_text = raw.str.replace(r"(?<=\d)\.0+$", "", regex=True)
-    result = cleaned_text.astype(object)
+    s = series.astype("string").fillna("").str.strip()
 
-    numeric = pd.to_numeric(raw, errors="coerce")
-    numeric_mask = numeric.notna()
-    int_like_mask = pd.Series(False, index=series.index)
-    if numeric_mask.any():
-        frac_ok = numeric.loc[numeric_mask].mod(1).abs().le(1e-9)
-        int_like_mask.loc[frac_ok.index] = frac_ok
+    # Identify entries that look numeric (including floats stored as text) and
+    # convert them back to their integer representation.
+    numeric = pd.to_numeric(s, errors="coerce")
+    mask = numeric.notna()
+    if mask.any():
+        s.loc[mask] = numeric.loc[mask].round(0).astype("Int64").astype(str)
 
-    if int_like_mask.any():
-        ints = numeric.loc[int_like_mask].round(0).astype(np.int64)
-        result.loc[int_like_mask] = ints.astype(object)
+    # Remove lingering trailing decimals from values that slipped past the
+    # numeric conversion (e.g. strings like "0000123.0").
+    s = s.str.replace(r"(?<=\d)\.0+$", "", regex=True)
 
-    return result
+    # Ensure digit-only strings keep their leading zeros by padding to seven
+    # characters.
+    digit_mask = s.str.fullmatch(r"\d+")
+    s.loc[digit_mask] = s.loc[digit_mask].str.zfill(7)
+
+    return s
 
 def parse_date(s): return pd.to_datetime(s, errors="coerce", dayfirst=True)
 

@@ -33,6 +33,39 @@ def ensure_numeric(s):
     out = pd.to_numeric(s, errors="coerce")
     return out.fillna(0)
 
+def normalise_pip(series: pd.Series) -> pd.Series:
+    """Return a cleaned textual representation of PIP codes.
+
+    The upstream extracts often provide the identifier as floats (e.g. 1234567.0)
+    which Excel displays with the trailing decimal.  We coerce any numeric-looking
+    values back to whole numbers, drop the decimal portion, and pad pure digit
+    values to seven characters – matching the typical PIP width – so the
+    generated spreadsheets already have the correct text formatting.
+    """
+
+    if series is None:
+        return series
+
+    s = series.astype("string").fillna("").str.strip()
+
+    # Identify entries that look numeric (including floats stored as text) and
+    # convert them back to their integer representation.
+    numeric = pd.to_numeric(s, errors="coerce")
+    mask = numeric.notna()
+    if mask.any():
+        s.loc[mask] = numeric.loc[mask].round(0).astype("Int64").astype(str)
+
+    # Remove lingering trailing decimals from values that slipped past the
+    # numeric conversion (e.g. strings like "0000123.0").
+    s = s.str.replace(r"(?<=\d)\.0+$", "", regex=True)
+
+    # Ensure digit-only strings keep their leading zeros by padding to seven
+    # characters.
+    digit_mask = s.str.fullmatch(r"\d+")
+    s.loc[digit_mask] = s.loc[digit_mask].str.zfill(7)
+
+    return s
+
 def parse_date(s): return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 def coalesce(a, b):
@@ -66,8 +99,6 @@ def apply_formats(writer, sheet_name, df):
     ws = writer.sheets[sheet_name]
     if not hasattr(writer, "_pct_fmt"):
         writer._pct_fmt = wb.add_format({"num_format": "0.0%"})
-    if not hasattr(writer, "_text_fmt"):
-        writer._text_fmt = wb.add_format({"num_format": "@"})
 
     widths = getattr(writer, "_col_widths", {})
 
@@ -75,7 +106,7 @@ def apply_formats(writer, sheet_name, df):
         col_key = str(col).strip().casefold()
         width = widths.get((sheet_name, idx))
         if col_key.startswith("pip"):
-            ws.set_column(idx, idx, width, writer._text_fmt)
+            ws.set_column(idx, idx, width)
         elif col_key.endswith("_pct"):
             ws.set_column(idx, idx, width, writer._pct_fmt)
 
@@ -205,7 +236,7 @@ def main():
         df["Group_Final"]        = grp_final2
         df["Orderlist_Final"]    = ordlist_final
         # Ensure the main PIP identifier stays text-based so Excel exports preserve formatting
-        df[oc["pipcode"]] = df[oc["pipcode"]].astype("string")
+        df[oc["pipcode"]] = normalise_pip(df[oc["pipcode"]])
         if prod_name: df["Product_Description"] = df[prod_name].astype("string")
         else: df["Product_Description"] = ""
         if prod_pack: df["Pack_Size"] = df[prod_pack].astype("string")

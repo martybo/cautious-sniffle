@@ -31,6 +31,7 @@ set "ORDERS=Orders Report Generator.csv"
 set "PRODUCT=ExportFullProductList.csv"
 set "SUBS=Substitutions.csv"
 set "ALIAS=BranchAlias.csv"
+set "DISP=disp report.csv"
 
 REM === Script ===
 set "SCRIPT=warehouse_shortage_report_v2g.py"
@@ -46,10 +47,11 @@ set "LOG=output\run_%D%_%T%.log"
 
 echo Python    : %PYEXE%
 echo Script    : %SCRIPT%
-echo Inputs    : "%ORDERS%" + "%PRODUCT%" + "%SUBS%"
+echo Inputs    : "%ORDERS%" + "%PRODUCT%" + "%SUBS%" + "%DISP%"
 echo WH-OLs    : %WH_OL%
 echo NC-OLs    : %NC_OL%
 echo Alias CSV : %ALIAS%
+echo Disp CSV  : %DISP%
 echo Log file  : %LOG%
 echo.
 
@@ -57,12 +59,14 @@ if not exist "%SCRIPT%" echo [ERROR] Missing script "%SCRIPT%" & pause & exit /b
 if not exist "%ORDERS%" echo [ERROR] Missing "%ORDERS%" & pause & exit /b 3
 if not exist "%PRODUCT%" echo [ERROR] Missing "%PRODUCT%" & pause & exit /b 4
 if not exist "%SUBS%" echo [WARN] Missing "%SUBS%" (continuing without substitutions)
+if not exist "%DISP%" echo [WARN] Missing "%DISP%" (continuing without dispensary report lookups)
 
 REM === Build command (NO PowerShell piping; pure cmd redirection) ===
 set "CMD=%PYEXE% "%SCRIPT%" --orders "%ORDERS%" --product-list "%PRODUCT%" --warehouse-orderlists "%WH_OL%" --nc-orderlists "%NC_OL%" --out "output\Shortage_Report.xlsx""
 
 if exist "%SUBS%" set "CMD=%CMD% --subs "%SUBS%""
 if exist "%ALIAS%" set "CMD=%CMD% --branch-alias-csv "%ALIAS%""
+if exist "%DISP%" set "CMD=%CMD% --disp-report "%DISP%""
 
 echo Running:
 echo   %CMD%

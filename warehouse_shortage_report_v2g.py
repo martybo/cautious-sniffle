@@ -668,7 +668,11 @@ def main():
         )
 
         # ------ Mismatch (Deliver != Order), info only ------
-        excluded_mismatch_sources = {"medicare warehouse", "warehouse cds"}
+        excluded_mismatch_sources = {
+            "medicare warehouse",
+            "warehouse cds",
+            "optimise",
+        }
         ordlist_cf = df["Orderlist_Final"].astype("string").str.strip().str.casefold()
         supplier_cf = df["SupplierName_Final"].astype("string").str.strip().str.casefold()
         mismatch_exclusion_mask = ordlist_cf.isin(excluded_mismatch_sources) | supplier_cf.isin(excluded_mismatch_sources)

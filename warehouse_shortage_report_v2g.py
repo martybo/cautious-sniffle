@@ -307,7 +307,12 @@ def main():
         # (Ord == max order).  In that situation the shortage comes from the request being
         # greater than the cap, so we look for request > cap and the order meeting the cap
         # (or higher, e.g. if the cap changes mid-stream).
-        rule2_mask = (mo > 0) & (df["_Req"] > mo) & (df["_Ord"] >= mo)
+        rule2_mask = (
+            (mo > 0)
+            & (df["_Req"] > mo)
+            & (df["_Ord"] >= mo)
+            & (df["_EffDel"] >= mo)
+        )
         rule2_capped_lines = int(rule2_mask.sum())
 
         # Base metric eligibility

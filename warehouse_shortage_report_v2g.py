@@ -61,6 +61,14 @@ def normalise_pip(series: pd.Series) -> pd.Series:
 
     return out
 
+def pip_join_key(series: pd.Series):
+    if series is None:
+        return None
+    normalised = normalise_pip(series)
+    if normalised is None:
+        return None
+    return normalised.astype("string").str.strip()
+
 def parse_date(s): return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 def coalesce(a, b):
@@ -135,6 +143,10 @@ CAND = {
     "delv":        ["Store Received Quantity","Deliver Qty","Delivered Qty","Received Qty","DeliverQty"],
 }
 
+DISP_TRADENAME_CANDS = ["Tradename", "Trade Name", "TradeName", "Product Name", "Description", "Item Description"]
+DISP_PACKSIZE_CANDS = ["Packsize", "Pack Size", "Pack size", "Pack_Size", "Pack"]
+DISP_ORDERLIST_CANDS = list(dict.fromkeys(CAND["orderlist"] + ["Order List", "OrderList"]))
+
 # ---------- main ----------
 def main():
     ap = argparse.ArgumentParser(
@@ -152,6 +164,7 @@ def main():
     ap.add_argument("--warehouse-orderlists", default="Warehouse;Medicare Warehouse;Xmas Warehouse;Perfumes;Warehouse CDs;Warehouse - CD Products")
     ap.add_argument("--nc-orderlists", default="Warehouse;Warehouse - CD Products")
     ap.add_argument("--branch-alias-csv", default=None)  # columns: Source,Alias
+    ap.add_argument("--disp-report", default=None, help="Optional dispensary report for unmatched PIP lookups (Tradename/Packsize/Orderlist).")
 
     args = ap.parse_args()
     out_path = Path(args.out); out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,6 +181,57 @@ def main():
         log(f"Reading product list: {args.product_list}")
         prod = pd.read_csv(args.product_list) if str(args.product_list).lower().endswith(".csv") else pd.read_excel(args.product_list)
         log(f"Product rows: {len(prod)} cols: {len(prod.columns)}")
+
+        disp_lookup = None
+        if args.disp_report:
+            log(f"Reading dispensary report: {args.disp_report}")
+            disp = pd.read_csv(args.disp_report) if str(args.disp_report).lower().endswith(".csv") else pd.read_excel(args.disp_report)
+            log(f"Dispensary report rows: {len(disp)} cols: {len(disp.columns)}")
+
+            disp_pip_col = find_col(disp, CAND["pipcode"])
+            disp_trade_col = find_col(disp, DISP_TRADENAME_CANDS)
+            disp_pack_col = find_col(disp, DISP_PACKSIZE_CANDS)
+            disp_orderlist_col = find_col(disp, DISP_ORDERLIST_CANDS)
+            log("Dispensary mapping: pip -> %s, tradename -> %s, pack -> %s, orderlist -> %s" % (
+                disp_pip_col, disp_trade_col, disp_pack_col, disp_orderlist_col
+            ))
+
+            if disp_pip_col:
+                disp_clean = disp.dropna(subset=[disp_pip_col]).copy()
+                disp_clean["_pip_key"] = pip_join_key(disp_clean[disp_pip_col])
+                disp_clean = disp_clean[disp_clean["_pip_key"].notna()]
+                disp_clean = disp_clean[disp_clean["_pip_key"].str.strip().ne("")]
+
+                if not disp_clean.empty:
+                    def fetch(col):
+                        if not col:
+                            return pd.Series("", index=disp_clean.index, dtype="string")
+                        return disp_clean[col].astype("string")
+
+                    disp_lookup = pd.DataFrame({
+                        "_pip_key": disp_clean["_pip_key"],
+                        "Tradename": fetch(disp_trade_col),
+                        "Packsize": fetch(disp_pack_col),
+                        "Orderlist": fetch(disp_orderlist_col),
+                    })
+
+                    disp_lookup = disp_lookup.fillna("")
+                    disp_lookup["_pip_key"] = disp_lookup["_pip_key"].astype("string")
+                    disp_lookup["_score"] = (
+                        disp_lookup["Tradename"].astype("string").str.strip().ne("").astype(int) * 4
+                        + disp_lookup["Packsize"].astype("string").str.strip().ne("").astype(int) * 2
+                        + disp_lookup["Orderlist"].astype("string").str.strip().ne("").astype(int)
+                    )
+                    disp_lookup = (
+                        disp_lookup
+                        .sort_values(by="_score", ascending=False)
+                        .drop_duplicates(subset=["_pip_key"], keep="first")
+                        .drop(columns="_score")
+                    )
+            else:
+                log("[WARN] Dispensary report missing PIP column; unmatched lookups will be blank.")
+        else:
+            log("No dispensary report supplied; unmatched lookups will be blank.")
 
         subs = None
         if args.subs:
@@ -762,6 +826,28 @@ def main():
             oc["ord"]:"Order Qty",
             oc["delv"]:"Deliver Qty",
         }).sort_values(by=["Branch","Branch Order No."])
+
+        if isinstance(disp_lookup, pd.DataFrame) and not disp_lookup.empty:
+            if not unmatched_pips_tab.empty:
+                unmatched_pips_tab["_pip_key"] = pip_join_key(unmatched_pips_tab["PIPCode"])
+                unmatched_pips_tab = unmatched_pips_tab.merge(disp_lookup, how="left", on="_pip_key")
+                unmatched_pips_tab = unmatched_pips_tab.drop(columns="_pip_key")
+                desired = ["PIPCode", "unmatched_count", "Tradename", "Packsize", "Orderlist"]
+                cols = [c for c in desired if c in unmatched_pips_tab.columns]
+                remaining = [c for c in unmatched_pips_tab.columns if c not in cols]
+                unmatched_pips_tab = unmatched_pips_tab[cols + remaining]
+
+            if not unmatched_orderlines_tab.empty:
+                unmatched_orderlines_tab["_pip_key"] = pip_join_key(unmatched_orderlines_tab["PIPCode"])
+                unmatched_orderlines_tab = unmatched_orderlines_tab.merge(disp_lookup, how="left", on="_pip_key")
+                unmatched_orderlines_tab = unmatched_orderlines_tab.drop(columns="_pip_key")
+                desired = [
+                    "Branch", "Branch Order No.", "Completed Date", "PIPCode", "Tradename", "Packsize", "Orderlist",
+                    "Req Qty", "Order Qty", "Deliver Qty", "Orderlist_Final"
+                ]
+                cols = [c for c in desired if c in unmatched_orderlines_tab.columns]
+                remaining = [c for c in unmatched_orderlines_tab.columns if c not in cols]
+                unmatched_orderlines_tab = unmatched_orderlines_tab[cols + remaining]
 
         # ------ Diagnostics ------
         non_opt_mask = ~optimise_mask

@@ -34,37 +34,32 @@ def ensure_numeric(s):
     return out.fillna(0)
 
 def normalise_pip(series: pd.Series) -> pd.Series:
-    """Return a cleaned representation of PIP codes suitable for Excel export.
+    """Return an Excel-friendly representation of PIP codes.
 
-    Any entries that can be interpreted as whole numbers are converted back to
-    integer objects so Excel will display them using the default *General*
-    formatting (i.e. without forcing a text format or preserving leading zeros).
-    Non-numeric values are trimmed and have trailing ``.0`` artefacts removed,
-    but otherwise left as text.
+    * Values that are whole numbers are emitted as actual integers so Excel
+      will display them using *General* formatting (dropping any leading
+      zeros the source data may contain).
+    * Non-numeric values are trimmed and have trailing ``.0`` artefacts
+      removed, but are otherwise left untouched.
     """
 
     if series is None:
         return series
 
-    s = series.astype("string").fillna("").str.strip()
+    raw = series.astype("string").fillna("").str.strip()
+    numeric = pd.to_numeric(raw, errors="coerce")
+    rounded = np.rint(numeric)
+    int_mask = numeric.notna() & np.isfinite(numeric) & np.isclose(numeric, rounded)
 
-    # Identify entries that look numeric (including floats stored as text) and
-    # convert them back to their integer representation.
-    numeric = pd.to_numeric(s, errors="coerce")
-    mask = numeric.notna()
-    if mask.any():
-        s.loc[mask] = numeric.loc[mask].round(0).astype("Int64").astype(str)
+    out = raw.astype(object)
+    if int_mask.any():
+        out.loc[int_mask] = rounded.loc[int_mask].astype("Int64")
 
-    # Remove lingering trailing decimals from values that slipped past the
-    # numeric conversion (e.g. strings like "0000123.0").
-    s = s.str.replace(r"(?<=\d)\.0+$", "", regex=True)
+    if (~int_mask).any():
+        cleaned = raw.loc[~int_mask].str.replace(r"(?<=\d)\.0+$", "", regex=True)
+        out.loc[~int_mask] = cleaned
 
-    # Ensure digit-only strings keep their leading zeros by padding to seven
-    # characters.
-    digit_mask = s.str.fullmatch(r"\d+")
-    s.loc[digit_mask] = s.loc[digit_mask].str.zfill(7)
-
-    return s
+    return out
 
 def parse_date(s): return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
@@ -593,13 +588,44 @@ def main():
 
         # ------ Branch_NC & Company_NC (only WH & WH-CD orderlists) ------
         nc_mask_final = roll_mask_base & nc_sorted
-        branch_nc = (
-            df.loc[nc_mask_final.to_numpy()]
-              .groupby("_Branch_NC", dropna=False)
-              .size().reset_index(name="unique_order_lines")  # lines, not unique PIPs
-        )
+        nc_rows = df.loc[nc_mask_final.to_numpy()].copy()
+        if nc_rows.empty:
+            branch_nc = pd.DataFrame(columns=[
+                "Branch Name",
+                "total_lines",
+                "non_completed_lines",
+                "non_completed_pct",
+            ])
+        else:
+            branch_nc = (
+                nc_rows
+                  .groupby("_Branch_NC", dropna=False)
+                  .agg(
+                      total_lines=("_Branch_NC", "size"),
+                      non_completed_lines=("_IsCompleted", lambda s: (~s.fillna(False)).sum()),
+                  )
+                  .reset_index()
+            )
+            branch_nc["non_completed_lines"] = branch_nc["non_completed_lines"].astype(int)
+            branch_nc["non_completed_pct"] = np.where(
+                branch_nc["total_lines"] > 0,
+                branch_nc["non_completed_lines"] / branch_nc["total_lines"],
+                0.0,
+            )
+            branch_nc = branch_nc.rename(columns={"_Branch_NC": "Branch Name"})
+            branch_nc = branch_nc[[
+                "Branch Name",
+                "total_lines",
+                "non_completed_lines",
+                "non_completed_pct",
+            ]]
+
+        total_lines = int(branch_nc["total_lines"].sum()) if not branch_nc.empty else 0
+        non_completed_total = int(branch_nc["non_completed_lines"].sum()) if not branch_nc.empty else 0
         company_nc = pd.DataFrame([{
-            "company_total_unique_order_lines": int(branch_nc["unique_order_lines"].sum())
+            "company_total_lines": total_lines,
+            "company_non_completed_lines": non_completed_total,
+            "company_non_completed_pct": (non_completed_total / total_lines) if total_lines else 0.0,
         }])
 
         # ------ Top_Short_PIPs (Top 50) ------
@@ -646,6 +672,7 @@ def main():
             "packSize",
             "binLocation",
             "mismatch_qty_difference",
+            "order_line_count",
         ]
         if not mis_mask.any() or not oc["pipcode"]:
             mis_summary = pd.DataFrame(columns=summary_columns)
@@ -682,9 +709,15 @@ def main():
                 mis_summary = (
                     summary_df
                     .groupby(["PIPCode", "productName", "packSize", "binLocation"], dropna=False)
-                    .agg(mismatch_qty_difference=("mismatch_qty_difference", "sum"))
+                    .agg(
+                        mismatch_qty_difference=("mismatch_qty_difference", "sum"),
+                        order_line_count=("mismatch_qty_difference", "size"),
+                    )
                     .reset_index()
                 )
+
+                if not mis_summary.empty:
+                    mis_summary["order_line_count"] = mis_summary["order_line_count"].astype(int)
 
                 if not mis_summary.empty:
                     mis_summary["abs_mismatch_qty_difference"] = mis_summary["mismatch_qty_difference"].abs()

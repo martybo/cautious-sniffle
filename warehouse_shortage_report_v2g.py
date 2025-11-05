@@ -297,9 +297,7 @@ def main():
 
         # ------ Unmatched PIPs (exclude from all calcs, but list) ------
         unmatched_mask = df[pc_key].isna()
-        unmatched_active = unmatched_mask & (~optimise_mask)
-        unmatched_pips = df.loc[unmatched_active, oc["pipcode"]].astype(str)
-        unmatched_detail = df.loc[unmatched_active].copy()
+        unmatched_active_base = unmatched_mask & (~optimise_mask)
 
         # ------ Rule 1 & Rule 2 (caps) ------
         has_dns_mask = dns_present(df["doNotStockReason_Final"])
@@ -356,6 +354,10 @@ def main():
         ord_lower = df["Orderlist_Final"].astype("string").str.strip().str.casefold()
         wh_like_mask = ord_lower.isin(wh_list)
         nc_like_mask = ord_lower.isin(nc_list)
+
+        unmatched_active = unmatched_active_base & wh_like_mask
+        unmatched_pips = df.loc[unmatched_active, oc["pipcode"]].astype(str)
+        unmatched_detail = df.loc[unmatched_active].copy()
 
         warehouse_like_rows_matched = int((metric_mask & wh_like_mask).sum())
 
